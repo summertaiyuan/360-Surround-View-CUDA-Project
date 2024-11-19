@@ -198,3 +198,105 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+
+
+
+import rclpy
+import numpy as np
+import shutil
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+import cv2
+import os
+from datetime import datetime
+import matplotlib.pyplot as plt
+
+
+class ImageSaverNode(Node):
+    def __init__(self):
+        super().__init__('image_saver_node')
+        self.left_subscription = self.create_subscription(
+            Image,
+            '/depth',
+            self.listener_left_callback,
+            10)
+
+        self.right_subscription = self.create_subscription(
+            Image,
+            '/depth',
+            self.listener_right_callback,
+            10)
+        self.bridge = CvBridge()
+        self.image_count = 0
+        self.save_path = './data/normal/' # 设置保存路径
+        self.ensure_directory_exists(self.save_path)
+
+        self.save_image = self.create_timer(1.0/15, self.timer_callback)
+        
+        self.left_image , self.right_image = None , None
+        self.msg = None
+        self.pause = False
+
+    def ensure_directory_exists(self, path):
+
+        if not os.path.exists(path):
+            os.makedirs(path)
+            self.get_logger().info(f'Created directory: {path}')
+        else:
+            shutil.rmtree(path)
+            self.get_logger().info(f'delete  directory: {path}')
+    
+    def listener_left_callback(self, msg):
+        try:
+            self.left_image = self.bridge.imgmsg_to_cv2(msg)
+            self.msg = msg 
+        except Exception as e:
+            self.get_logger().error('Failed to convert image message to cv2 image: %s' % e)
+            return
+        
+    def listener_right_callback(self, msg):
+        try:
+            self.right_image= self.bridge.imgmsg_to_cv2(msg)
+            self.msg = msg
+        except Exception as e:
+            self.get_logger().error('Failed to convert image message to cv2 image: %s' % e)
+            return
+
+    def timer_callback(self):
+
+        timestamp = self.msg.header.stamp.sec * 1000000 + self.msg.header.stamp.nanosec // 1000  # 微秒
+        timestamp_str = datetime.fromtimestamp(timestamp / 1000000).strftime('%Y%m%d_%H%M%S%f')[:-3]
+        left_image_filename = os.path.join(self.save_path, f'{timestamp_str}_left.png')  
+        right_image_filename = os.path.join(self.save_path, f'{timestamp_str}_right.png')  
+
+        images = np.hstack((self.left_image. self.right_image))
+        plt.imshow(images)
+        plt.show()
+        
+        key =  cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            self.pause = True
+        elif key == ord('c'):
+            self.pause = False
+
+        if not self.pause:
+            cv2.imwrite(left_image_filename, self.left_image)
+            cv2.imwrite(right_image_filename, self.right_image)
+            self.get_logger().info(f'Saved image: {self.left_image_filename}')
+
+        
+
+def main(args=None):
+    rclpy.init(args=args)
+    image_saver_node = ImageSaverNode()
+    rclpy.spin(image_saver_node)
+
+    # 销毁节点
+    image_saver_node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+
+
