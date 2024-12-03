@@ -1,0 +1,245 @@
+import argparse
+import shutil
+from pathlib import Path
+
+import cv2
+import message_filters
+import numpy as np
+import rclpy
+import yaml
+from cv_bridge import CvBridge
+from rclpy.node import Node
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
+from vision_msgs.msg import Detection3DArray
+
+
+class ROS2ImageSaver(Node):
+    QUEUE_SIZE = 10
+
+    def __init__(self, args):
+        super().__init__("ros2_image_saver")
+        self.bridge = CvBridge()
+        self.args =  args
+        # Set the base directory to the current directory
+        base_dir = Path(".").resolve()  # Current directory
+        data_dir = "1016-typeC-d405"
+
+        # Subdirectories for different topics
+        self.segmentation_dir = base_dir / data_dir / "masks"
+        self.image_dir = base_dir / data_dir / "rgb"
+        self.depth_dir = base_dir / data_dir / "depth"
+        self.camera_info_dir = base_dir / data_dir / "camera_info"
+        self.pose = base_dir / data_dir / "pose"
+        # Ensure directories exist
+
+        root_dir = base_dir / data_dir
+        # 删除非空目录及其内容
+        if root_dir.exists() and root_dir.is_dir():
+            shutil.rmtree(root_dir)
+            print(f"Successfully deleted the root_dir and its contents: {root_dir}")
+        else:
+            print(f"root_dir does not exist or is not a root_dir: {root_dir}")
+
+        self.segmentation_dir.mkdir(parents=True, exist_ok=True)
+        self.image_dir.mkdir(parents=True, exist_ok=True)
+        self.depth_dir.mkdir(parents=True, exist_ok=True)
+        self.camera_info_dir.mkdir(parents=True, exist_ok=True)
+        self.pose.mkdir(parents=True, exist_ok=True)
+
+        self.mask_subscription = message_filters.Subscriber(
+            self,
+            Image,
+            "/segmentation",
+            #    self.segmentation_callback,
+            #    10
+        )
+
+        #self.image_topic = "/realsense2_camera/color/image_rect_raw"
+        #self.depth_topic = '/realsense2_camera/aligned_depth_to_color/image_raw'
+        self.image_topic = "/camera/camera/color/image_raw"
+        self.depth_topic = "/camera/camera/depth/image_rect_raw"
+        # self.image_topic = '/image_rect'
+
+        self.image_subscription = message_filters.Subscriber(
+            self, Image, self.image_topic
+        )
+        self.depth_subscription = message_filters.Subscriber(
+            self, Image, self.depth_topic
+        )
+
+        self.time_synchronizer = message_filters.TimeSynchronizer(
+            [self.image_subscription, self.depth_subscription], self.QUEUE_SIZE
+        )
+        
+        # self.time_synchronizer = message_filters.ApproximateTimeSynchronizer(
+        #     [self.image_subscription, self.depth_subscription], self.QUEUE_SIZE, 0.1
+        # )
+
+        self.time_synchronizer.registerCallback(self.image_callback)
+
+        self.camera_info_sub = self.create_subscription(
+            CameraInfo, "/camera_info_rect", self.camera_info_callback, 10
+        )
+
+        # self.create_subscription(
+        #    Detection3DArray,
+        #    '/tracking/output',
+        #    self.pose_callback,
+        #    10
+        # )
+
+        self.frame = 0
+
+        self.timer = self.create_timer(
+            1 / 10.0, self.process_image
+        )  # 定时器频率为 5 Hz
+
+        self.latest_image, self.latest_depth, self.latest_mask = None, None, None
+
+    def image_callback(self, msg, depth_msg):
+        # 每次更新最新的图像消息
+        self.latest_image = msg
+        self.latest_depth = depth_msg
+
+    # def image_callback(self, msg, depth_msg):
+    #     timestamp = msg.header.stamp
+    #     filename = self.image_dir / f"{timestamp.sec}_{timestamp.nanosec}.png"
+    #     cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+    #     cv2.imwrite(str(filename), cv_image)
+
+    #     filename_depth = self.depth_dir / f"{timestamp.sec}_{timestamp.nanosec}.png"
+    #     cv_depth = self.bridge.imgmsg_to_cv2(depth_msg)
+    #     # print(cv_depth.max())
+    #     # print(cv_depth.dtype)
+    #     cv2.imwrite(str(filename_depth), cv_depth)
+
+    def process_image(self):
+        # 每 1/5 秒处理一次最新的图像
+        if self.latest_image is not None:
+            self.get_logger().info("Processing latest image at 5 Hz...")
+
+            msg, depth_msg = self.latest_image, self.latest_depth
+            timestamp = msg.header.stamp
+            filename = self.image_dir / f"{timestamp.sec}_{timestamp.nanosec:09}.png"
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            cv2.imwrite(str(filename), cv_image)
+
+            filename_depth = (
+                self.depth_dir / f"{timestamp.sec}_{timestamp.nanosec:09}.png"
+            )
+            cv_depth = self.bridge.imgmsg_to_cv2(depth_msg)
+            # print(cv_depth.max())
+            # print(cv_depth.dtype)
+            cv2.imwrite(str(filename_depth), cv_depth)
+
+        self.latest_image, self.latest_depth = None, None
+
+    def segmentation_callback(self, msg):
+        timestamp = msg.header.stamp
+        filename = (
+            self.segmentation_dir / f"{timestamp.sec}_{timestamp.nanosec:09}_.png"
+        )
+        cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        cv2.imwrite(str(filename), cv_image)
+
+    def pose_callback(self, msg):
+        timestamp = msg.header.stamp
+        filename = (
+            self.pose / f"{timestamp.sec}_{timestamp.nanosec:09}_{self.frame}.yaml"
+        )
+        size = msg.detections[0]
+        center = msg.detections[0]
+        camera_info_dict = {
+            "header": {
+                "stamp": {
+                    "secs": msg.header.stamp.sec,
+                    "nsecs": msg.header.stamp.nanosec,
+                },
+                "frame_id": msg.header.frame_id,
+            },
+            "bbox": {
+                "center": {
+                    "position": {
+                        "x": center.bbox.center.position.x,
+                        "y": center.bbox.center.position.y,
+                        "z": center.bbox.center.position.z,
+                    },
+                    "orientation": {
+                        "x": center.bbox.center.orientation.x,
+                        "y": center.bbox.center.orientation.y,
+                        "z": center.bbox.center.orientation.z,
+                        "w": center.bbox.center.orientation.w,
+                    },
+                },
+                "size": {
+                    "x": size.bbox.size.x,
+                    "y": size.bbox.size.y,
+                    "z": size.bbox.size.z,
+                },
+            },
+        }
+
+        with open(filename, "w") as f:
+            yaml.dump(camera_info_dict, f, default_flow_style=False)
+            # f.write(str(msg.detections[0].bbox))
+        self.frame += 1
+
+    def depth_callback(self, msg):
+        timestamp = msg.header.stamp
+        filename = self.depth_dir / f"{timestamp.sec}_{timestamp.nanosec:09}.png"
+        cv_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        # # print(cv_depth.max())
+        # print(cv_depth.dtype)
+        cv2.imwrite(str(filename), cv_depth)
+
+    def camera_info_callback(self, msg):
+        timestamp = msg.header.stamp
+        filename = (
+            self.camera_info_dir
+            / f"camera_info_{timestamp.sec}_{timestamp.nanosec:09}.yaml"
+        )
+        camera_info_dict = {
+            "header": {
+                "stamp": {
+                    "secs": msg.header.stamp.sec,
+                    "nsecs": msg.header.stamp.nanosec,
+                },
+                "frame_id": msg.header.frame_id,
+            },
+            "height": msg.height,
+            "width": msg.width,
+            "distortion_model": msg.distortion_model,
+            # 'D': list(msg.d),
+            # 'K': list(msg.k),
+            "binning_x": msg.binning_x,
+            "binning_y": msg.binning_y,
+            "roi": {
+                "x_offset": msg.roi.x_offset,
+                "y_offset": msg.roi.y_offset,
+                "height": msg.roi.height,
+                "width": msg.roi.width,
+                "do_rectify": msg.roi.do_rectify,
+            },
+        }
+
+        with open(filename, "w") as f:
+            yaml.dump(camera_info_dict, f, default_flow_style=False)
+            f.write(str(msg))
+        self.destroy_subscription(self.camera_info_sub)
+
+
+def main(args=None):
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--point', action='store_true', help="record pointcloud")
+    args = parser.parse_args()    
+
+    rclpy.init(args=None)
+    node = ROS2ImageSaver(args)
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()
